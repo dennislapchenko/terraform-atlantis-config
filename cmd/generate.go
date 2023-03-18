@@ -240,20 +240,20 @@ func FindRootModulesInPath(rootPath string) ([]string, error) {
 
 // Finds the absolute paths of all terragrunt.hcl files
 func getAllTerraformRootModules(path string) ([]string, error) {
-
 	// If filterPath is provided, override workingPath instead of gitRoot
 	// We do this here because we want to keep the relative path structure of Terragrunt files
 	// to root and just ignore the ConfigFiles
 	workingPaths := []string{path}
 
 	// filters are not working (yet) if using project hcl files (which are kind of filters by themselves)
-	//if filterPath != "" {
-	//	// get all matching folders
-	//	workingPaths, err = filepath.Glob(filterPath)
-	//	if err != nil {
-	//		return nil, err
-	//	}
-	//}
+	var err error
+	if filterPath != "" {
+		// get all matching folders
+		workingPaths, err = filepath.Glob(filterPath)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	uniqueConfigFilePaths := make(map[string]bool)
 	orderedConfigFilePaths := []string{}
@@ -290,8 +290,7 @@ func main(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	gitRoot = absoluteGitRoot + string(filepath.Separator)
-	workingDirs := []string{"/Users/dlapcenko/dev/whisk/whisk-terraform"}
-	//workingDirs := []string{gitRoot}
+	workingDirs := []string{gitRoot}
 
 	// Read in the old config, if it already exists
 	oldConfig, err := readOldConfig()

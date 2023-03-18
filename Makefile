@@ -1,9 +1,7 @@
-VERSION=0.1.5
+VERSION=0.1.6
 PATH_BUILD=build/
 FILE_COMMAND=terraform-atlantis-config
 FILE_ARCH=darwin_amd64
-S3_BUCKET_NAME=cloudfront-origin-homebrew-tap-transcend-io
-PROFILE=transcend-prod
 
 # Determine the arch/os combos we're building for
 XC_ARCH=amd64 arm
@@ -13,25 +11,6 @@ XC_OS=linux darwin windows
 clean:
 	rm -rf ./build
 	rm -rf '$(HOME)/bin/$(FILE_COMMAND)'
-
-.PHONY: build
-build: clean
-	CGO_ENABLED=0 \
-	goxc \
-    -bc="darwin,amd64" \
-    -pv=$(VERSION) \
-    -d=$(PATH_BUILD) \
-    -build-ldflags "-X main.VERSION=$(VERSION)"
-
-.PHONY: build-all
-build-all: clean
-	CGO_ENABLED=0 \
-	goxc \
-	-os="$(XC_OS)" \
-	-arch="$(XC_ARCH)" \
-    -pv=$(VERSION) \
-    -d=$(PATH_BUILD) \
-    -build-ldflags "-X main.VERSION=$(VERSION)"
 
 .PHONY: gotestsum
 gotestsum:
