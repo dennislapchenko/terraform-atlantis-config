@@ -1,6 +1,6 @@
-VERSION=1.16.0
+VERSION=0.1.5
 PATH_BUILD=build/
-FILE_COMMAND=terragrunt-atlantis-config
+FILE_COMMAND=terraform-atlantis-config
 FILE_ARCH=darwin_amd64
 S3_BUCKET_NAME=cloudfront-origin-homebrew-tap-transcend-io
 PROFILE=transcend-prod
