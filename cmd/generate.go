@@ -1,16 +1,13 @@
 package cmd
 
 import (
+	"github.com/hashicorp/terraform/configs"
 	"regexp"
 	"sort"
 
-	"github.com/hashicorp/go-getter"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/ghodss/yaml"
-	"github.com/gruntwork-io/terragrunt/cli"
-	"github.com/gruntwork-io/terragrunt/config"
-	"github.com/gruntwork-io/terragrunt/options"
 	"github.com/spf13/cobra"
 
 	"golang.org/x/sync/errgroup"
@@ -26,19 +23,6 @@ import (
 	"sync"
 )
 
-// Parse env vars into a map
-func getEnvs() map[string]string {
-	envs := os.Environ()
-	m := make(map[string]string)
-
-	for _, env := range envs {
-		results := strings.Split(env, "=")
-		m[results[0]] = results[1]
-	}
-
-	return m
-}
-
 // Terragrunt imports can be relative or absolute
 // This makes relative paths absolute
 func makePathAbsolute(path string, parentPath string) string {
@@ -52,36 +36,6 @@ func makePathAbsolute(path string, parentPath string) string {
 
 var requestGroup singleflight.Group
 
-// Set up a cache for the getDependencies function
-type getDependenciesOutput struct {
-	dependencies []string
-	err          error
-}
-
-type GetDependenciesCache struct {
-	mtx  sync.RWMutex
-	data map[string]getDependenciesOutput
-}
-
-func newGetDependenciesCache() *GetDependenciesCache {
-	return &GetDependenciesCache{data: map[string]getDependenciesOutput{}}
-}
-
-func (m *GetDependenciesCache) set(k string, v getDependenciesOutput) {
-	m.mtx.Lock()
-	defer m.mtx.Unlock()
-	m.data[k] = v
-}
-
-func (m *GetDependenciesCache) get(k string) (getDependenciesOutput, bool) {
-	m.mtx.RLock()
-	defer m.mtx.RUnlock()
-	v, ok := m.data[k]
-	return v, ok
-}
-
-var getDependenciesCache = newGetDependenciesCache()
-
 func uniqueStrings(str []string) []string {
 	keys := make(map[string]bool)
 	list := []string{}
@@ -92,18 +46,6 @@ func uniqueStrings(str []string) []string {
 		}
 	}
 	return list
-}
-
-func lookupProjectHcl(m map[string][]string, value string) (key string) {
-	for k, values := range m {
-		for _, val := range values {
-			if val == value {
-				key = k
-				return
-			}
-		}
-	}
-	return key
 }
 
 // sliceUnion takes two slices of strings and produces a union of them, containing only unique values
@@ -123,116 +65,24 @@ func sliceUnion(a, b []string) []string {
 }
 
 // Parses the terragrunt config at `path` to find all modules it depends on
-func getDependencies(path string, terragruntOptions *options.TerragruntOptions) ([]string, error) {
-	res, err, _ := requestGroup.Do(path, func() (interface{}, error) {
-		// Check if this path has already been computed
-		cachedResult, ok := getDependenciesCache.get(path)
-		if ok {
-			return cachedResult.dependencies, cachedResult.err
-		}
-
-		// parse the module path to find what it includes, as well as its potential to be a parent
-		// return nils to indicate we should skip this project
-		isParent, includes, err := parseModule(path, terragruntOptions)
-		if err != nil {
-			getDependenciesCache.set(path, getDependenciesOutput{nil, err})
-			return nil, err
-		}
-		if isParent && ignoreParentTerragrunt {
-			getDependenciesCache.set(path, getDependenciesOutput{nil, nil})
-			return nil, nil
-		}
+func getDependencies(module *configs.Module, locals ResolvedLocals) ([]string, error) {
+	res, err, _ := requestGroup.Do(module.SourceDir, func() (interface{}, error) {
 
 		dependencies := []string{}
-		if len(includes) > 0 {
-			for _, includeDep := range includes {
-				getDependenciesCache.set(includeDep.Path, getDependenciesOutput{nil, err})
-				dependencies = append(dependencies, includeDep.Path)
-			}
-		}
-
-		// Parse the HCL file
-		decodeTypes := []config.PartialDecodeSectionType{
-			config.DependencyBlock,
-			config.DependenciesBlock,
-			config.TerraformBlock,
-		}
-		parsedConfig, err := config.PartialParseConfigFile(path, terragruntOptions, nil, decodeTypes)
-		if err != nil {
-			getDependenciesCache.set(path, getDependenciesOutput{nil, err})
-			return nil, err
-		}
-
-		// Parse out locals
-		locals, err := parseLocals(path, terragruntOptions, nil)
-		if err != nil {
-			getDependenciesCache.set(path, getDependenciesOutput{nil, err})
-			return nil, err
-		}
-
 		// Get deps from locals
 		if locals.ExtraAtlantisDependencies != nil {
 			dependencies = sliceUnion(dependencies, locals.ExtraAtlantisDependencies)
 		}
 
-		// Get deps from `dependencies` and `dependency` blocks
-		if parsedConfig.Dependencies != nil && !ignoreDependencyBlocks {
-			for _, parsedPaths := range parsedConfig.Dependencies.Paths {
-				dependencies = append(dependencies, filepath.Join(parsedPaths, "terragrunt.hcl"))
-			}
-		}
-
-		// Get deps from the `Source` field of the `Terraform` block
-		if parsedConfig.Terraform != nil && parsedConfig.Terraform.Source != nil {
-			source := parsedConfig.Terraform.Source
-
-			// Use `go-getter` to normalize the source paths
-			parsedSource, err := getter.Detect(*source, filepath.Dir(path), getter.Detectors)
+		// Get deps from locally used modules
+		if !ignoreLocalSubModules {
+			ls, err := parseTerraformLocalModuleSource(module)
 			if err != nil {
 				return nil, err
 			}
+			sort.Strings(ls)
 
-			// Check if the path begins with a drive letter, denoting Windows
-			isWindowsPath, err := regexp.MatchString(`^[A-Z]:`, parsedSource)
-			if err != nil {
-				return nil, err
-			}
-
-			// If the normalized source begins with `file://`, or matched the Windows drive letter check, it is a local path
-			if strings.HasPrefix(parsedSource, "file://") || isWindowsPath {
-				// Remove the prefix so we have a valid filesystem path
-				parsedSource = strings.TrimPrefix(parsedSource, "file://")
-
-				dependencies = append(dependencies, filepath.Join(parsedSource, "*.tf*"))
-
-				ls, err := parseTerraformLocalModuleSource(parsedSource)
-				if err != nil {
-					return nil, err
-				}
-				sort.Strings(ls)
-
-				dependencies = append(dependencies, ls...)
-			}
-		}
-
-		// Get deps from `extra_arguments` fields of the `Terraform` block
-		if parsedConfig.Terraform != nil && parsedConfig.Terraform.ExtraArgs != nil {
-			extraArgs := parsedConfig.Terraform.ExtraArgs
-			for _, arg := range extraArgs {
-				if arg.RequiredVarFiles != nil {
-					dependencies = append(dependencies, *arg.RequiredVarFiles...)
-				}
-				if arg.OptionalVarFiles != nil {
-					dependencies = append(dependencies, *arg.OptionalVarFiles...)
-				}
-				if arg.Arguments != nil {
-					for _, cliFlag := range *arg.Arguments {
-						if strings.HasPrefix(cliFlag, "-var-file=") {
-							dependencies = append(dependencies, strings.TrimPrefix(cliFlag, "-var-file="))
-						}
-					}
-				}
-			}
+			dependencies = append(dependencies, ls...)
 		}
 
 		// Filter out and dependencies that are the empty string
@@ -241,73 +91,13 @@ func getDependencies(path string, terragruntOptions *options.TerragruntOptions) 
 			if dep != "" {
 				childDepAbsPath := dep
 				if !filepath.IsAbs(childDepAbsPath) {
-					childDepAbsPath = makePathAbsolute(dep, path)
+					childDepAbsPath = makePathAbsolute(dep, module.SourceDir)
 				}
 				childDepAbsPath = filepath.ToSlash(childDepAbsPath)
 				nonEmptyDeps = append(nonEmptyDeps, childDepAbsPath)
 			}
 		}
-
-		// Recurse to find dependencies of all dependencies
-		cascadedDeps := []string{}
-		for _, dep := range nonEmptyDeps {
-			cascadedDeps = append(cascadedDeps, dep)
-
-			// The "cascading" feature is protected by a flag
-			if !cascadeDependencies {
-				continue
-			}
-
-			depPath := dep
-			terrOpts, _ := options.NewTerragruntOptions(depPath)
-			terrOpts.OriginalTerragruntConfigPath = terragruntOptions.OriginalTerragruntConfigPath
-			childDeps, err := getDependencies(depPath, terrOpts)
-			if err != nil {
-				continue
-			}
-
-			for _, childDep := range childDeps {
-				// If `childDep` is a relative path, it will be relative to `childDep`, as it is from the nested
-				// `getDependencies` call on the top level module's dependencies. So here we update any relative
-				// path to be from the top level module instead.
-				childDepAbsPath := childDep
-				if !filepath.IsAbs(childDep) {
-					childDepAbsPath, err = filepath.Abs(filepath.Join(depPath, "..", childDep))
-					if err != nil {
-						getDependenciesCache.set(path, getDependenciesOutput{nil, err})
-						return nil, err
-					}
-				}
-				childDepAbsPath = filepath.ToSlash(childDepAbsPath)
-
-				// Ensure we are not adding a duplicate dependency
-				alreadyExists := false
-				for _, dep := range cascadedDeps {
-					if dep == childDepAbsPath {
-						alreadyExists = true
-						break
-					}
-				}
-				if !alreadyExists {
-					cascadedDeps = append(cascadedDeps, childDepAbsPath)
-				}
-			}
-		}
-
-		if filepath.Base(path) == "terragrunt.hcl" {
-			dir := filepath.Dir(path)
-
-			ls, err := parseTerraformLocalModuleSource(dir)
-			if err != nil {
-				return nil, err
-			}
-			sort.Strings(ls)
-
-			cascadedDeps = append(cascadedDeps, ls...)
-		}
-
-		getDependenciesCache.set(path, getDependenciesOutput{cascadedDeps, err})
-		return cascadedDeps, nil
+		return dependencies, nil
 	})
 
 	if res != nil {
@@ -318,16 +108,21 @@ func getDependencies(path string, terragruntOptions *options.TerragruntOptions) 
 }
 
 // Creates an AtlantisProject for a directory
-func createProject(sourcePath string) (*AtlantisProject, error) {
-	options, err := options.NewTerragruntOptions(sourcePath)
-	if err != nil {
-		return nil, err
-	}
-	options.OriginalTerragruntConfigPath = sourcePath
-	options.RunTerragrunt = cli.RunTerragrunt
-	options.Env = getEnvs()
+func createProject(path string) (*AtlantisProject, error) {
+	// Errors here are only warnings that we can live with. All these modules have already been loaded in dir walk phase
+	rootModule, _ := configs.NewParser(nil).LoadConfigDir(path)
 
-	dependencies, err := getDependencies(sourcePath, options)
+	absoluteSourceDir := rootModule.SourceDir + string(filepath.Separator)
+
+	locals := resolveLocals(rootModule)
+
+	// If `atlantis_skip` is true on the module, then do not produce a project for it
+	if locals.Skip != nil && *locals.Skip {
+		return nil, nil
+	}
+
+	dependencies := []string{}
+	dependencies, err := getDependencies(rootModule, locals)
 	if err != nil {
 		return nil, err
 	}
@@ -337,29 +132,14 @@ func createProject(sourcePath string) (*AtlantisProject, error) {
 		return nil, nil
 	}
 
-	absoluteSourceDir := filepath.Dir(sourcePath) + string(filepath.Separator)
-
-	locals, err := parseLocals(sourcePath, options, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	// If `atlantis_skip` is true on the module, then do not produce a project for it
-	if locals.Skip != nil && *locals.Skip {
-		return nil, nil
-	}
-
 	// All dependencies depend on their own .hcl file, and any tf files in their directory
-	relativeDependencies := []string{
-		"*.hcl",
-		"*.tf*",
-	}
+	relativeDependencies := autoPlanFileList
 
 	// Add other dependencies based on their relative paths. We always want to output with Unix path separators
 	for _, dependencyPath := range dependencies {
 		absolutePath := dependencyPath
 		if !filepath.IsAbs(absolutePath) {
-			absolutePath = makePathAbsolute(dependencyPath, sourcePath)
+			absolutePath = makePathAbsolute(dependencyPath, rootModule.SourceDir)
 		}
 		relativePath, err := filepath.Rel(absoluteSourceDir, absolutePath)
 		if err != nil {
@@ -430,157 +210,36 @@ func createProject(sourcePath string) (*AtlantisProject, error) {
 	return project, nil
 }
 
-func createHclProject(sourcePaths []string, workingDir string, projectHcl string) (*AtlantisProject, error) {
-	var projectHclDependencies []string
-	var childDependencies []string
-	workflow := defaultWorkflow
-	applyRequirements := &defaultApplyRequirements
-	resolvedAutoPlan := autoPlan
-	terraformVersion := defaultTerraformVersion
+func FindRootModulesInPath(rootPath string) ([]string, error) {
+	var rootModules []string
 
-	projectHclFile := filepath.Join(workingDir, projectHcl)
-	projectHclOptions, err := options.NewTerragruntOptions(workingDir)
-	if err != nil {
-		return nil, err
-	}
-	projectHclOptions.RunTerragrunt = cli.RunTerragrunt
-	projectHclOptions.Env = getEnvs()
-
-	locals, err := parseLocals(projectHclFile, projectHclOptions, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	// If `atlantis_skip` is true on the module, then do not produce a project for it
-	if locals.Skip != nil && *locals.Skip {
-		return nil, nil
-	}
-
-	// if project markers are enabled, check if locals are set
-	markedProject := false
-	if locals.markedProject != nil {
-		markedProject = *locals.markedProject
-	}
-	if useProjectMarkers && !markedProject {
-		return nil, nil
-	}
-
-	if locals.ExtraAtlantisDependencies != nil {
-		for _, dep := range locals.ExtraAtlantisDependencies {
-			relDep, err := filepath.Rel(workingDir, dep)
-			if err != nil {
-				return nil, err
-			}
-			projectHclDependencies = append(projectHclDependencies, filepath.ToSlash(relDep))
-		}
-	}
-
-	if locals.AtlantisWorkflow != "" {
-		workflow = locals.AtlantisWorkflow
-	}
-
-	if len(defaultApplyRequirements) == 0 {
-		applyRequirements = nil
-	}
-	if locals.ApplyRequirements != nil {
-		applyRequirements = &locals.ApplyRequirements
-	}
-
-	if locals.AutoPlan != nil {
-		resolvedAutoPlan = *locals.AutoPlan
-	}
-
-	if locals.TerraformVersion != "" {
-		terraformVersion = locals.TerraformVersion
-	}
-
-	// build dependencies for terragrunt childs in directories below project hcl file
-	for _, sourcePath := range sourcePaths {
-		options, err := options.NewTerragruntOptions(sourcePath)
-		if err != nil {
-			return nil, err
-		}
-		options.RunTerragrunt = cli.RunTerragrunt
-		options.Env = getEnvs()
-
-		dependencies, err := getDependencies(sourcePath, options)
-		if err != nil {
-			return nil, err
-		}
-		// dependencies being nil is a sign from `getDependencies` that this project should be skipped
-		if dependencies == nil {
-			return nil, nil
+	err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+		// Skip .terraform and .git dirs
+		if info.IsDir() && (info.Name() == ".terraform" || info.Name() == ".git") {
+			return filepath.SkipDir
 		}
 
-		// All dependencies depend on their own .hcl file, and any tf files in their directory
-		relativeDependencies := []string{
-			"*.hcl",
-			"*.tf*",
-			"**/*.hcl",
-			"**/*.tf*",
-		}
+		if info.IsDir() {
 
-		// Add other dependencies based on their relative paths. We always want to output with Unix path separators
-		for _, dependencyPath := range dependencies {
-			absolutePath := dependencyPath
-			if !filepath.IsAbs(absolutePath) {
-				absolutePath = makePathAbsolute(dependencyPath, sourcePath)
+			module, diag := configs.NewParser(nil).LoadConfigDir(path)
+			if diag.HasErrors() && module.Backend == nil {
+				log.Debugf("Failed to load module at: %s", path)
+				return nil
 			}
 
-			relativePath, err := filepath.Rel(workingDir, absolutePath)
-			if err != nil {
-				return nil, err
+			if module.Backend == nil {
+				return nil
 			}
-
-			if !strings.Contains(absolutePath, filepath.ToSlash(workingDir)) {
-				relativeDependencies = append(relativeDependencies, filepath.ToSlash(relativePath))
-			}
+			rootModules = append(rootModules, path)
 		}
+		return nil
+	})
 
-		childDependencies = append(childDependencies, relativeDependencies...)
-	}
-	dir, err := filepath.Rel(gitRoot, workingDir)
-	if err != nil {
-		return nil, err
-	}
-
-	project := &AtlantisProject{
-		Dir:               filepath.ToSlash(dir),
-		Workflow:          workflow,
-		TerraformVersion:  terraformVersion,
-		ApplyRequirements: applyRequirements,
-		Autoplan: AutoplanConfig{
-			Enabled:      resolvedAutoPlan,
-			WhenModified: uniqueStrings(append(childDependencies, projectHclDependencies...)),
-		},
-	}
-
-	// Terraform Cloud limits the workspace names to be less than 90 characters
-	// with letters, numbers, -, and _
-	// https://www.terraform.io/docs/cloud/workspaces/naming.html
-	// It is not clear from documentation whether the normal workspaces have those limitations
-	// However a workspace 97 chars long has been working perfectly.
-	// We are going to use the same name for both workspace & project name as it is unique.
-	regex := regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
-	projectName := regex.ReplaceAllString(project.Dir, "_")
-
-	if createProjectName {
-		project.Name = projectName
-	}
-
-	if createWorkspace {
-		project.Workspace = projectName
-	}
-
-	return project, nil
+	return rootModules, err
 }
 
 // Finds the absolute paths of all terragrunt.hcl files
-func getAllTerragruntFiles(path string) ([]string, error) {
-	options, err := options.NewTerragruntOptions(path)
-	if err != nil {
-		return nil, err
-	}
+func getAllTerraformRootModules(path string) ([]string, error) {
 
 	// If filterPath is provided, override workingPath instead of gitRoot
 	// We do this here because we want to keep the relative path structure of Terragrunt files
@@ -588,18 +247,18 @@ func getAllTerragruntFiles(path string) ([]string, error) {
 	workingPaths := []string{path}
 
 	// filters are not working (yet) if using project hcl files (which are kind of filters by themselves)
-	if filterPath != "" && len(projectHclFiles) == 0 {
-		// get all matching folders
-		workingPaths, err = filepath.Glob(filterPath)
-		if err != nil {
-			return nil, err
-		}
-	}
+	//if filterPath != "" {
+	//	// get all matching folders
+	//	workingPaths, err = filepath.Glob(filterPath)
+	//	if err != nil {
+	//		return nil, err
+	//	}
+	//}
 
 	uniqueConfigFilePaths := make(map[string]bool)
 	orderedConfigFilePaths := []string{}
 	for _, workingPath := range workingPaths {
-		paths, err := config.FindConfigFilesInPath(workingPath, options)
+		paths, err := FindRootModulesInPath(workingPath)
 		if err != nil {
 			return nil, err
 		}
@@ -624,39 +283,6 @@ func getAllTerragruntFiles(path string) ([]string, error) {
 	return uniqueConfigFileAbsPaths, nil
 }
 
-// Finds the absolute paths of all arbitrary project hcl files
-func getAllTerragruntProjectHclFiles() map[string][]string {
-	projectHclFiles := projectHclFiles
-	orderedHclFilePaths := map[string][]string{}
-	uniqueHclFileAbsPaths := map[string][]string{}
-	for _, projectHclFile := range projectHclFiles {
-		err := filepath.Walk(gitRoot, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-
-			if !info.IsDir() && info.Name() == projectHclFile {
-				orderedHclFilePaths[projectHclFile] = append(orderedHclFilePaths[projectHclFile], filepath.Dir(path))
-			}
-
-			return nil
-		})
-
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		for _, uniquePath := range orderedHclFilePaths[projectHclFile] {
-			uniqueAbsPath, err := filepath.Abs(uniquePath)
-			if err != nil {
-				return nil
-			}
-			uniqueHclFileAbsPaths[projectHclFile] = append(uniqueHclFileAbsPaths[projectHclFile], uniqueAbsPath)
-		}
-	}
-	return uniqueHclFileAbsPaths
-}
-
 func main(cmd *cobra.Command, args []string) error {
 	// Ensure the gitRoot has a trailing slash and is an absolute path
 	absoluteGitRoot, err := filepath.Abs(gitRoot)
@@ -664,22 +290,9 @@ func main(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	gitRoot = absoluteGitRoot + string(filepath.Separator)
-	workingDirs := []string{gitRoot}
-	projectHclDirMap := map[string][]string{}
-	var projectHclDirs []string
-	if len(projectHclFiles) > 0 {
-		workingDirs = nil
-		// map [project-hcl-file] => directories containing project-hcl-file
-		projectHclDirMap = getAllTerragruntProjectHclFiles()
-		for _, projectHclFile := range projectHclFiles {
-			projectHclDirs = append(projectHclDirs, projectHclDirMap[projectHclFile]...)
-			workingDirs = append(workingDirs, projectHclDirMap[projectHclFile]...)
-		}
-		// parse terragrunt child modules outside the scope of projectHclDirs
-		if createHclProjectExternalChilds {
-			workingDirs = append(workingDirs, gitRoot)
-		}
-	}
+	workingDirs := []string{"/Users/dlapcenko/dev/whisk/whisk-terraform"}
+	//workingDirs := []string{gitRoot}
+
 	// Read in the old config, if it already exists
 	oldConfig, err := readOldConfig()
 	if err != nil {
@@ -704,86 +317,15 @@ func main(cmd *cobra.Command, args []string) error {
 	sem := semaphore.NewWeighted(numExecutors)
 
 	for _, workingDir := range workingDirs {
-		terragruntFiles, err := getAllTerragruntFiles(workingDir)
+		terraformRootModules, err := getAllTerraformRootModules(workingDir)
 		if err != nil {
 			return err
 		}
 
-		if len(projectHclDirs) == 0 || createHclProjectChilds || (createHclProjectExternalChilds && workingDir == gitRoot) {
-			// Concurrently looking all dependencies
-			for _, terragruntPath := range terragruntFiles {
-				terragruntPath := terragruntPath // https://golang.org/doc/faq#closures_and_goroutines
+		// Concurrently looking all dependencies
+		for _, rootModule := range terraformRootModules {
+			modulePath := rootModule // https://golang.org/doc/faq#closures_and_goroutines
 
-				// don't create atlantis projects already covered by project hcl file projects
-				skipProject := false
-				if createHclProjectExternalChilds && workingDir == gitRoot && len(projectHclDirs) > 0 {
-					for _, projectHclDir := range projectHclDirs {
-						if strings.HasPrefix(terragruntPath, projectHclDir) {
-							skipProject = true
-							break
-						}
-					}
-				}
-				if skipProject {
-					continue
-				}
-				err := sem.Acquire(ctx, 1)
-				if err != nil {
-					return err
-				}
-
-				errGroup.Go(func() error {
-					defer sem.Release(1)
-					project, err := createProject(terragruntPath)
-					if err != nil {
-						return err
-					}
-					// if project and err are nil then skip this project
-					if err == nil && project == nil {
-						return nil
-					}
-
-					// Lock the list as only one goroutine should be writing to config.Projects at a time
-					lock.Lock()
-					defer lock.Unlock()
-
-					// When preserving existing projects, we should update existing blocks instead of creating a
-					// duplicate, when generating something which already has representation
-					if preserveProjects {
-						updateProject := false
-
-						// TODO: with Go 1.19, we can replace for loop with slices.IndexFunc for increased performance
-						for i := range config.Projects {
-							if config.Projects[i].Dir == project.Dir {
-								updateProject = true
-								log.Info("Updated project for ", terragruntPath)
-								config.Projects[i] = *project
-
-								// projects should be unique, let's exit for loop for performance
-								// once first occurrence is found and replaced
-								break
-							}
-						}
-
-						if !updateProject {
-							log.Info("Created project for ", terragruntPath)
-							config.Projects = append(config.Projects, *project)
-						}
-					} else {
-						log.Info("Created project for ", terragruntPath)
-						config.Projects = append(config.Projects, *project)
-					}
-
-					return nil
-				})
-			}
-
-			if err := errGroup.Wait(); err != nil {
-				return err
-			}
-		}
-		if len(projectHclDirs) > 0 && workingDir != gitRoot {
-			projectHcl := lookupProjectHcl(projectHclDirMap, workingDir)
 			err := sem.Acquire(ctx, 1)
 			if err != nil {
 				return err
@@ -791,7 +333,7 @@ func main(cmd *cobra.Command, args []string) error {
 
 			errGroup.Go(func() error {
 				defer sem.Release(1)
-				project, err := createHclProject(terragruntFiles, workingDir, projectHcl)
+				project, err := createProject(modulePath)
 				if err != nil {
 					return err
 				}
@@ -799,19 +341,44 @@ func main(cmd *cobra.Command, args []string) error {
 				if err == nil && project == nil {
 					return nil
 				}
+
 				// Lock the list as only one goroutine should be writing to config.Projects at a time
 				lock.Lock()
 				defer lock.Unlock()
 
-				log.Info("Created "+projectHcl+" project for ", workingDir)
-				config.Projects = append(config.Projects, *project)
+				// When preserving existing projects, we should update existing blocks instead of creating a
+				// duplicate, when generating something which already has representation
+				if preserveProjects {
+					updateProject := false
+
+					// TODO: with Go 1.19, we can replace for loop with slices.IndexFunc for increased performance
+					for i := range config.Projects {
+						if config.Projects[i].Dir == project.Dir {
+							updateProject = true
+							log.Info("Updated project for ", modulePath)
+							config.Projects[i] = *project
+
+							// projects should be unique, let's exit for loop for performance
+							// once first occurrence is found and replaced
+							break
+						}
+					}
+
+					if !updateProject {
+						log.Info("Created project for ", modulePath)
+						config.Projects = append(config.Projects, *project)
+					}
+				} else {
+					log.Info("Created project for ", modulePath)
+					config.Projects = append(config.Projects, *project)
+				}
 
 				return nil
 			})
+		}
 
-			if err := errGroup.Wait(); err != nil {
-				return err
-			}
+		if err := errGroup.Wait(); err != nil {
+			return err
 		}
 	}
 
@@ -894,10 +461,10 @@ func main(cmd *cobra.Command, args []string) error {
 
 var gitRoot string
 var autoPlan bool
+var autoPlanFileList []string
 var autoMerge bool
-var ignoreParentTerragrunt bool
-var createParentProject bool
-var ignoreDependencyBlocks bool
+var ignoreLocalSubModules bool
+var localSubModulesExclude []string
 var parallel bool
 var createWorkspace bool
 var createProjectName bool
@@ -907,13 +474,8 @@ var filterPath string
 var outputPath string
 var preserveWorkflows bool
 var preserveProjects bool
-var cascadeDependencies bool
 var defaultApplyRequirements []string
 var numExecutors int64
-var projectHclFiles []string
-var createHclProjectChilds bool
-var createHclProjectExternalChilds bool
-var useProjectMarkers bool
 var executionOrderGroups bool
 
 // generateCmd represents the generate command
@@ -934,15 +496,13 @@ func init() {
 
 	generateCmd.PersistentFlags().BoolVar(&autoPlan, "autoplan", false, "Enable auto plan. Default is disabled")
 	generateCmd.PersistentFlags().BoolVar(&autoMerge, "automerge", false, "Enable auto merge. Default is disabled")
-	generateCmd.PersistentFlags().BoolVar(&ignoreParentTerragrunt, "ignore-parent-terragrunt", true, "Ignore parent terragrunt configs (those which don't reference a terraform module). Default is enabled")
-	generateCmd.PersistentFlags().BoolVar(&createParentProject, "create-parent-project", false, "Create a project for the parent terragrunt configs (those which don't reference a terraform module). Default is disabled")
-	generateCmd.PersistentFlags().BoolVar(&ignoreDependencyBlocks, "ignore-dependency-blocks", false, "When true, dependencies found in `dependency` blocks will be ignored")
 	generateCmd.PersistentFlags().BoolVar(&parallel, "parallel", true, "Enables plans and applys to happen in parallel. Default is enabled")
+	generateCmd.PersistentFlags().BoolVar(&ignoreLocalSubModules, "ignore-local-sub-modules", false, "When true, dependencies found in `dependency` blocks will be ignored")
+	generateCmd.PersistentFlags().StringSliceVar(&localSubModulesExclude, "local-sub-modules-exclude", []string{}, "Local sub modules that should be excluded from being added to 'when_modified' if --ignore-local-sub-modules is false (default)")
+	generateCmd.PersistentFlags().StringSliceVar(&autoPlanFileList, "autoplan-file-list", []string{"*.tf*"}, "Glob of module-local files that should be included in auto plan")
 	generateCmd.PersistentFlags().BoolVar(&createWorkspace, "create-workspace", false, "Use different workspace for each project. Default is use default workspace")
-	generateCmd.PersistentFlags().BoolVar(&createProjectName, "create-project-name", false, "Add different name for each project. Default is false")
 	generateCmd.PersistentFlags().BoolVar(&preserveWorkflows, "preserve-workflows", true, "Preserves workflows from old output files. Default is true")
 	generateCmd.PersistentFlags().BoolVar(&preserveProjects, "preserve-projects", false, "Preserves projects from old output files to enable incremental builds. Default is false")
-	generateCmd.PersistentFlags().BoolVar(&cascadeDependencies, "cascade-dependencies", true, "When true, dependencies will cascade, meaning that a module will be declared to depend not only on its dependencies, but all dependencies of its dependencies all the way down. Default is true")
 	generateCmd.PersistentFlags().StringVar(&defaultWorkflow, "workflow", "", "Name of the workflow to be customized in the atlantis server. Default is to not set")
 	generateCmd.PersistentFlags().StringSliceVar(&defaultApplyRequirements, "apply-requirements", []string{}, "Requirements that must be satisfied before `atlantis apply` can be run. Currently the only supported requirements are `approved` and `mergeable`. Can be overridden by locals")
 	generateCmd.PersistentFlags().StringVar(&outputPath, "output", "", "Path of the file where configuration will be generated. Default is not to write to file")
@@ -950,10 +510,6 @@ func init() {
 	generateCmd.PersistentFlags().StringVar(&gitRoot, "root", pwd, "Path to the root directory of the git repo you want to build config for. Default is current dir")
 	generateCmd.PersistentFlags().StringVar(&defaultTerraformVersion, "terraform-version", "", "Default terraform version to specify for all modules. Can be overriden by locals")
 	generateCmd.PersistentFlags().Int64Var(&numExecutors, "num-executors", 15, "Number of executors used for parallel generation of projects. Default is 15")
-	generateCmd.PersistentFlags().StringSliceVar(&projectHclFiles, "project-hcl-files", []string{}, "Comma-separated names of arbitrary hcl files in the terragrunt hierarchy to create Atlantis projects for. Disables the --filter flag")
-	generateCmd.PersistentFlags().BoolVar(&createHclProjectChilds, "create-hcl-project-childs", false, "Creates Atlantis projects for terragrunt child modules below the directories containing the HCL files defined in --project-hcl-files")
-	generateCmd.PersistentFlags().BoolVar(&createHclProjectExternalChilds, "create-hcl-project-external-childs", true, "Creates Atlantis projects for terragrunt child modules outside the directories containing the HCL files defined in --project-hcl-files")
-	generateCmd.PersistentFlags().BoolVar(&useProjectMarkers, "use-project-markers", false, "Creates Atlantis projects only for project hcl files with locals: atlantis_project = true")
 	generateCmd.PersistentFlags().BoolVar(&executionOrderGroups, "execution-order-groups", false, "Computes execution_order_groups for projects")
 }
 

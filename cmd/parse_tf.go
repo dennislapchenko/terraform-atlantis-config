@@ -1,11 +1,9 @@
 package cmd
 
 import (
-	"errors"
+	"github.com/hashicorp/terraform/configs"
+	"path/filepath"
 	"strings"
-
-	"github.com/gruntwork-io/terragrunt/util"
-	"github.com/hashicorp/terraform-config-inspect/tfconfig"
 )
 
 var localModuleSourcePrefixes = []string{
@@ -15,18 +13,16 @@ var localModuleSourcePrefixes = []string{
 	"..\\",
 }
 
-func parseTerraformLocalModuleSource(path string) ([]string, error) {
-	module, diags := tfconfig.LoadModule(path)
-	// modules, diags := parser.loadConfigDir(path)
-	if diags.HasErrors() {
-		return nil, errors.New(diags.Error())
-	}
+func joinPath(elem ...string) string {
+	return filepath.ToSlash(filepath.Join(elem...))
+}
 
+func parseTerraformLocalModuleSource(module *configs.Module) ([]string, error) {
 	var sourceMap = map[string]bool{}
 	for _, mc := range module.ModuleCalls {
-		if isLocalTerraformModuleSource(mc.Source) {
-			modulePath := util.JoinPath(path, mc.Source)
-			modulePathGlob := util.JoinPath(modulePath, "*.tf*")
+		if isLocalTerraformModuleSource(mc.SourceAddr) && !isExcludedSubModule(mc.SourceAddr) {
+			modulePath := joinPath(module.SourceDir, mc.SourceAddr)
+			modulePathGlob := joinPath(modulePath, "*.tf*")
 
 			if _, exists := sourceMap[modulePathGlob]; exists {
 				continue
@@ -34,14 +30,18 @@ func parseTerraformLocalModuleSource(path string) ([]string, error) {
 			sourceMap[modulePathGlob] = true
 
 			// find local module source recursively
-			subSources, err := parseTerraformLocalModuleSource(modulePath)
-			if err != nil {
-				return nil, err
-			}
-
-			for _, subSource := range subSources {
-				sourceMap[subSource] = true
-			}
+			//subModule, diags := configs.NewParser(nil).LoadConfigDir(modulePath)
+			//if diags.HasErrors() {
+			//	return nil, errors.New(diags.Error())
+			//}
+			//subSources, err := parseTerraformLocalModuleSource(subModule)
+			//if err != nil {
+			//	return nil, err
+			//}
+			//
+			//for _, subSource := range subSources {
+			//	sourceMap[subSource] = true
+			//}
 		}
 	}
 
@@ -51,6 +51,16 @@ func parseTerraformLocalModuleSource(path string) ([]string, error) {
 	}
 
 	return sources, nil
+}
+
+func isExcludedSubModule(addr string) bool {
+	for _, module := range localSubModulesExclude {
+		if strings.Contains(addr, module) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func isLocalTerraformModuleSource(raw string) bool {

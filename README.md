@@ -1,26 +1,33 @@
 <p align="center">
   <img alt="Terragrunt Atlantis Config by Transcend" src="https://user-images.githubusercontent.com/7354176/78756035-f9863480-792e-11ea-96d3-d4ffe50e0269.png"/>
 </p>
-<h1 align="center">Terragrunt Atlantis Config</h1>
+<h1 align="center">Terraform Atlantis Config</h1>
 <p align="center">
-  <strong>Generate Atlantis Config for Terragrunt projects.</strong>
+  <strong>Generate Atlantis Config for Terraform projects.</strong>
 </p>
 <br />
 
-## What is this?
+## A fork of [terragrunt-atlantis-config](https://github.com/transcend-io/terragrunt-atlantis-config) made to work with vanilla Terraform
+Original repo was forked in order to quickly solve the need to generate atlantis configs for vanilla Terraform the same way its done for Terragrunt.
+No existing tool could do so in the same manner, especially giving the ability to alter config via `locals`.
+The core logic was rewritten, using the initial work done by transcend-io.
 
+#### TODO:
+- [ ] Adapt tests to Terraform
+- [ ] Fully adapt this README.md to remove terragrunt mentions
+- [ ] Find a way how to use latest Terraform versions. Currently impossible because `hashicorp/terraform/configs` was moved to internal, however same (locals) functionality was not replicated in `terraform-config-inspect`
+
+## What is this?
+All below README contents are yet to be fully refactored, but most of it applied to this tool too.
 [Atlantis](https://runatlantis.io) is an awesome tool for Terraform pull request automation. Each repo can have a YAML config file that defines Terraform module dependencies, so that PRs that affect dependent modules will automatically generate `terraform plan`s for those modules.
 
-[Terragrunt](https://terragrunt.gruntwork.io) is a Terraform wrapper, which has the concept of dependencies built into its configuration.
+This tool creates Atlantis YAML configurations for Terraform projects by:
 
-This tool creates Atlantis YAML configurations for Terragrunt projects by:
-
-- Finding all `terragrunt.hcl` in a repo
-- Evaluating their `dependency`, `terraform`, `locals`, and other source blocks to find their dependencies
-- Creating a Directed Acyclic Graph of all dependencies
+- Finding all root modules that contain a `backend{}` configuration in a repo
+- Evaluating their `module` and `locals` blocks to find their dependencies
 - Constructing and logging YAML in Atlantis' config spec that reflects the graph
 
-This is especially useful for organizations that use monorepos for their Terragrunt config (as we do at Transcend), and have thousands of lines of config.
+This is especially useful for organizations that use monorepos for their Terraform config, and have thousands of lines of config.
 
 ## Integrate into your Atlantis Server
 
@@ -156,7 +163,6 @@ Another way to customize the output is to use `locals` values in your terragrunt
 | `atlantis_autoplan`           | Allows overriding the `--autoplan` flag for a single module                                                                                                    | bool         |
 | `atlantis_skip`               | If true on a child module, that module will not appear in the output.<br>If true on a parent module, none of that parent's children will appear in the output. | bool         |
 | `extra_atlantis_dependencies` | See [Extra dependencies](https://github.com/transcend-io/terragrunt-atlantis-config#extra-dependencies)                                                        | list(string) |
-| `atlantis_project`            | Create Atlantis project for a project hcl file. Only functional with `--project-hcl-files` and `--use-project-markers` | bool         |
 
 ## Separate workspace for parallel plan and apply
 

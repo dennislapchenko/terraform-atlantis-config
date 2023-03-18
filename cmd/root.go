@@ -12,9 +12,9 @@ var (
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:          "terragrunt-atlantis-config",
-	Short:        "Generates Atlantis Config for Terragrunt projects",
-	Long:         "Generates Atlantis Config for Terragrunt projects",
+	Use:          "terraform-atlantis-config",
+	Short:        "Generates Atlantis Config for Terraform projects",
+	Long:         "Generates Atlantis Config for Terraform projects",
 	SilenceUsage: true,
 }
 

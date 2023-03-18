@@ -14,7 +14,7 @@ jobs:
       # Install golang
       - uses: actions/setup-go@v2
         with:
-          go-version: '^1.16'
+          go-version: '^1.19'
 
       # Install external go modules before cloning
       - run: go install github.com/laher/goxc@latest

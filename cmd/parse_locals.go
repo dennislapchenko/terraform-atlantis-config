@@ -5,14 +5,7 @@ package cmd
 // parses the `locals` blocks and evaluates their contents.
 
 import (
-	"github.com/gruntwork-io/terragrunt/config"
-	"github.com/gruntwork-io/terragrunt/errors"
-	"github.com/gruntwork-io/terragrunt/options"
-	"github.com/gruntwork-io/terragrunt/util"
-	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/hcl/v2/hclparse"
-	"github.com/zclconf/go-cty/cty"
-
+	"github.com/hashicorp/terraform/configs"
 	"path/filepath"
 )
 
@@ -40,153 +33,73 @@ type ResolvedLocals struct {
 	markedProject *bool
 }
 
-// parseHcl uses the HCL2 parser to parse the given string into an HCL file body.
-func parseHcl(parser *hclparse.Parser, hcl string, filename string) (file *hcl.File, err error) {
-	// The HCL2 parser and especially cty conversions will panic in many types of errors, so we have to recover from
-	// those panics here and convert them to normal errors
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = errors.WithStackTrace(config.PanicWhileParsingConfig{RecoveredValue: recovered, ConfigFile: filename})
-		}
-	}()
-
-	if filepath.Ext(filename) == ".json" {
-		file, parseDiagnostics := parser.ParseJSON([]byte(hcl), filename)
-		if parseDiagnostics != nil && parseDiagnostics.HasErrors() {
-			return nil, parseDiagnostics
-		}
-
-		return file, nil
-	}
-
-	file, parseDiagnostics := parser.ParseHCL([]byte(hcl), filename)
-	if parseDiagnostics != nil && parseDiagnostics.HasErrors() {
-		return nil, parseDiagnostics
-	}
-
-	return file, nil
-}
-
-// Merges in values from a child into a parent set of `local` values
-func mergeResolvedLocals(parent ResolvedLocals, child ResolvedLocals) ResolvedLocals {
-	if child.AtlantisWorkflow != "" {
-		parent.AtlantisWorkflow = child.AtlantisWorkflow
-	}
-
-	if child.TerraformVersion != "" {
-		parent.TerraformVersion = child.TerraformVersion
-	}
-
-	if child.AutoPlan != nil {
-		parent.AutoPlan = child.AutoPlan
-	}
-
-	if child.Skip != nil {
-		parent.Skip = child.Skip
-	}
-
-	if child.markedProject != nil {
-		parent.markedProject = child.markedProject
-	}
-
-	if child.ApplyRequirements != nil || len(child.ApplyRequirements) > 0 {
-		parent.ApplyRequirements = child.ApplyRequirements
-	}
-
-	parent.ExtraAtlantisDependencies = append(parent.ExtraAtlantisDependencies, child.ExtraAtlantisDependencies...)
-
-	return parent
-}
-
-// Parses a given file, returning a map of all it's `local` values
-func parseLocals(path string, terragruntOptions *options.TerragruntOptions, includeFromChild *config.IncludeConfig) (ResolvedLocals, error) {
-	configString, err := util.ReadFileAsString(path)
-	if err != nil {
-		return ResolvedLocals{}, err
-	}
-
-	// Parse the HCL string into an AST body
-	parser := hclparse.NewParser()
-	file, err := parseHcl(parser, configString, path)
-	if err != nil {
-		return ResolvedLocals{}, err
-	}
-
-	// Decode just the Base blocks. See the function docs for DecodeBaseBlocks for more info on what base blocks are.
-	localsAsCty, trackInclude, err := config.DecodeBaseBlocks(terragruntOptions, parser, file, path, includeFromChild, nil)
-	if err != nil {
-		return ResolvedLocals{}, err
-	}
-
-	// Recurse on the parent to merge in the locals from that file
-	mergedParentLocals := ResolvedLocals{}
-	if trackInclude != nil && includeFromChild == nil {
-		for _, includeConfig := range trackInclude.CurrentList {
-			parentLocals, _ := parseLocals(includeConfig.Path, terragruntOptions, &includeConfig)
-			mergedParentLocals = mergeResolvedLocals(mergedParentLocals, parentLocals)
-		}
-	}
-	childLocals := resolveLocals(*localsAsCty)
-
-	return mergeResolvedLocals(mergedParentLocals, childLocals), nil
-}
-
-func resolveLocals(localsAsCty cty.Value) ResolvedLocals {
+func resolveLocals(module *configs.Module) ResolvedLocals {
 	resolved := ResolvedLocals{}
+	locals := module.Locals
 
 	// Return an empty set of locals if no `locals` block was present
-	if localsAsCty == cty.NilVal {
+	if len(locals) == 0 {
 		return resolved
 	}
-	rawLocals := localsAsCty.AsValueMap()
 
-	workflowValue, ok := rawLocals["atlantis_workflow"]
+	workflowValue, ok := locals["atlantis_workflow"]
 	if ok {
-		resolved.AtlantisWorkflow = workflowValue.AsString()
-	}
-
-	versionValue, ok := rawLocals["atlantis_terraform_version"]
-	if ok {
-		resolved.TerraformVersion = versionValue.AsString()
-	}
-
-	autoPlanValue, ok := rawLocals["atlantis_autoplan"]
-	if ok {
-		hasValue := autoPlanValue.True()
-		resolved.AutoPlan = &hasValue
-	}
-
-	skipValue, ok := rawLocals["atlantis_skip"]
-	if ok {
-		hasValue := skipValue.True()
-		resolved.Skip = &hasValue
-	}
-
-	applyReqs, ok := rawLocals["atlantis_apply_requirements"]
-	if ok {
-		resolved.ApplyRequirements = []string{}
-		it := applyReqs.ElementIterator()
-		for it.Next() {
-			_, val := it.Element()
-			resolved.ApplyRequirements = append(resolved.ApplyRequirements, val.AsString())
+		val, diag := workflowValue.Expr.Value(nil)
+		if !diag.HasErrors() {
+			resolved.AtlantisWorkflow = val.AsString()
 		}
 	}
 
-	markedProject, ok := rawLocals["atlantis_project"]
+	versionValue, ok := locals["atlantis_terraform_version"]
 	if ok {
-		hasValue := markedProject.True()
-		resolved.markedProject = &hasValue
+		val, diag := versionValue.Expr.Value(nil)
+		if !diag.HasErrors() {
+			resolved.TerraformVersion = val.AsString()
+		}
+	}
+	//
+	autoPlanValue, ok := locals["atlantis_autoplan"]
+	if ok {
+		val, diag := autoPlanValue.Expr.Value(nil)
+		if !diag.HasErrors() {
+			hasValue := val.True()
+			resolved.AutoPlan = &hasValue
+		}
+
 	}
 
-	extraDependenciesAsCty, ok := rawLocals["extra_atlantis_dependencies"]
+	skipValue, ok := locals["atlantis_skip"]
 	if ok {
-		it := extraDependenciesAsCty.ElementIterator()
-		for it.Next() {
-			_, val := it.Element()
-			resolved.ExtraAtlantisDependencies = append(
-				resolved.ExtraAtlantisDependencies,
-				filepath.ToSlash(val.AsString()),
-			)
+		val, diag := skipValue.Expr.Value(nil)
+		if !diag.HasErrors() {
+			hasValue := val.True()
+			resolved.Skip = &hasValue
+		}
+	}
+
+	applyReqs, ok := locals["atlantis_apply_requirements"]
+	if ok {
+		val, diag := applyReqs.Expr.Value(nil)
+		if !diag.HasErrors() {
+			resolved.ApplyRequirements = []string{}
+			it := val.ElementIterator()
+			for it.Next() {
+				_, val := it.Element()
+				resolved.ApplyRequirements = append(resolved.ApplyRequirements, val.AsString())
+			}
+		}
+
+	}
+
+	extraDependencies, ok := locals["extra_atlantis_dependencies"]
+	if ok {
+		val, diag := extraDependencies.Expr.Value(nil)
+		if !diag.HasErrors() {
+			it := val.ElementIterator()
+			for it.Next() {
+				_, val := it.Element()
+				resolved.ExtraAtlantisDependencies = append(resolved.ExtraAtlantisDependencies, filepath.ToSlash(val.AsString()))
+			}
 		}
 	}
 

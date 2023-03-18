@@ -21,15 +21,11 @@ func resetForRun() error {
 	}
 
 	// reset caches
-	getDependenciesCache = newGetDependenciesCache()
 	requestGroup = singleflight.Group{}
 	// reset flags
 	gitRoot = pwd
 	autoPlan = false
 	autoMerge = false
-	cascadeDependencies = true
-	ignoreParentTerragrunt = true
-	ignoreDependencyBlocks = false
 	parallel = true
 	createWorkspace = false
 	createProjectName = false
@@ -40,10 +36,6 @@ func resetForRun() error {
 	outputPath = ""
 	defaultTerraformVersion = ""
 	defaultApplyRequirements = []string{}
-	projectHclFiles = []string{}
-	createHclProjectChilds = false
-	createHclProjectExternalChilds = true
-	useProjectMarkers = false
 
 	return nil
 }

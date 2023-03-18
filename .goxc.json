@@ -1,5 +1,5 @@
 {
-  "AppName": "terragrunt-atlantis-config",
+  "AppName": "terraform-atlantis-config",
   "ConfigVersion": "0.9",
   "ResourcesExclude": "LICENSE",
   "BuildSettings": {
