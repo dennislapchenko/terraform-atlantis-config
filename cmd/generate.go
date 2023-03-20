@@ -30,8 +30,7 @@ func makePathAbsolute(path string, parentPath string) string {
 		return path
 	}
 
-	parentDir := filepath.Dir(parentPath)
-	return filepath.Join(parentDir, path)
+	return filepath.Join(parentPath, path)
 }
 
 var requestGroup singleflight.Group
