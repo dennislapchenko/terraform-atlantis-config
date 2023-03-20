@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"github.com/hashicorp/terraform/configs"
+	"github.com/zclconf/go-cty/cty"
 	"path/filepath"
 )
 
@@ -31,6 +32,8 @@ type ResolvedLocals struct {
 
 	// If set to true, create Atlantis project
 	markedProject *bool
+
+	ExecutionOrderGroup int
 }
 
 func resolveLocals(module *configs.Module) ResolvedLocals {
@@ -47,6 +50,17 @@ func resolveLocals(module *configs.Module) ResolvedLocals {
 		val, diag := workflowValue.Expr.Value(nil)
 		if !diag.HasErrors() {
 			resolved.AtlantisWorkflow = val.AsString()
+		}
+	}
+
+	executionOrderGroup, ok := locals["atlantis_execution_order_group"]
+	if ok {
+		val, diag := executionOrderGroup.Expr.Value(nil)
+		if !diag.HasErrors() {
+			if val.Type().Equals(cty.Number) {
+				intValue, _ := val.AsBigFloat().Int64()
+				resolved.ExecutionOrderGroup = int(intValue)
+			}
 		}
 	}
 

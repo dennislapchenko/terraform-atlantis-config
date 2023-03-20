@@ -190,6 +190,10 @@ func createProject(path string) (*AtlantisProject, error) {
 		},
 	}
 
+	if locals.ExecutionOrderGroup > 0 {
+		project.ExecutionOrderGroup = locals.ExecutionOrderGroup
+	}
+
 	// Terraform Cloud limits the workspace names to be less than 90 characters
 	// with letters, numbers, -, and _
 	// https://www.terraform.io/docs/cloud/workspaces/naming.html
