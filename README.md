@@ -17,6 +17,39 @@ The core logic was rewritten, using the initial work done by transcend-io.
 - [ ] Fully adapt this README.md to remove terragrunt mentions
 - [ ] Find a way how to use latest Terraform versions. Currently impossible because `hashicorp/terraform/configs` was moved to internal, however same (locals) functionality was not replicated in `terraform-config-inspect`
 
+
+# Up To Date Doc:
+
+
+## All Locals
+
+Another way to customize the output is to use object `atlantis` in `locals` block in your terraform modules. These settings will only affect the current module/
+
+| Locals Name                    | Description                                                                                                                                                    | type         |
+|--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------|
+| `atlantis.workflow`            | The custom atlantis workflow name to use for a module                                                                                                          | string       |
+| `atlantis.apply_requirements`  | The custom `apply_requirements` array to use for a module                                                                                                      | list(string) |
+| `atlantis.terraform_version`   | Allows overriding the `--terraform-version` flag for a single module                                                                                           | string       |
+| `atlantis.autoplan`            | Allows overriding the `--autoplan` flag for a single module                                                                                                    | bool         |
+| `atlantis.skip`                | If true on a child module, that module will not appear in the output.<br>If true on a parent module, none of that parent's children will appear in the output. | bool         |
+| `atlantis.extra__dependencies` | See [Extra dependencies](https://github.com/transcend-io/terragrunt-atlantis-config#extra-dependencies)                                                        | list(string) |
+| `atlantis.execution_order_group`  | See [Execution order group](https://www.runatlantis.io/docs/repo-level-atlantis-yaml.html#order-of-planning-applying)                                                         | number        |
+Full example:
+```hcl
+locals {
+  atlantis = {
+    workflow = "my-workflow"
+    apply_requirements = ["approved"]
+    terraform_version = "1.3.7"
+    autoplan = true
+    skip = false
+    extra_dependencies = ["../../common-config.yaml"]
+    execution_order_group = 1
+  }
+}
+```
+
+# Out of Date Doc
 ## What is this?
 All below README contents are yet to be fully refactored, but most of it applied to this tool too.
 [Atlantis](https://runatlantis.io) is an awesome tool for Terraform pull request automation. Each repo can have a YAML config file that defines Terraform module dependencies, so that PRs that affect dependent modules will automatically generate `terraform plan`s for those modules.
@@ -123,8 +156,6 @@ One way to customize the behavior of this module is through CLI flag values pass
 |------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------|
 | `--autoplan`                 | The default value for autoplan settings. Can be overriden by locals.                                                                                                            | false             |
 | `--automerge`                | Enables the automerge setting for a repo.                                                                                                                                       | false             |
-| `--cascade-dependencies`     | When true, dependencies will cascade, meaning that a module will be declared to depend not only on its dependencies, but all dependencies of its dependencies all the way down. | true              |
-| `--ignore-parent-terragrunt` | Ignore parent Terragrunt configs (those which don't reference a terraform module).<br>In most cases, this should be set to `true`                                               | true              |
 | `--parallel`                 | Enables `plan`s and `apply`s to happen in parallel. Will typically be used with `--create-workspace`                                                                            | true              |
 | `--create-workspace`         | Use different auto-generated workspace for each project. Default is use default workspace for everything                                                                        | false             |
 | `--create-project-name`      | Add different auto-generated name for each project                                                                                                                              | false             |
@@ -135,34 +166,10 @@ One way to customize the behavior of this module is through CLI flag values pass
 | `--output`                   | Path of the file where configuration will be generated. Typically, you want a file named "atlantis.yaml". Default is to write to `stdout`.                                      | ""                |
 | `--root`                     | Path to the root directory of the git repo you want to build config for.                                                                                                        | current directory |
 | `--terraform-version`        | Default terraform version to specify for all modules. Can be overriden by locals                                                                                                | ""                |
-| `--ignore-dependency-blocks` | When true, dependencies found in `dependency` and `dependencies` blocks will be ignored                                                                                         | false             |
-| `--filter`                   | Path or glob expression to the directory you want scope down the config for. Default is all files in root                                                                       | ""                |
 | `--num-executors`            | Number of executors used for parallel generation of projects. Default is 15                                                                                                     | 15                |
 | `--execution-order-groups`   | Computes execution_order_group for projects                                                                                                                                     | false             |
 
-## Project generation
 
-These flags offer additional options to generate Atlantis projects based on HCL configuration files in the terragrunt hierarchy. This, for example, enables Atlantis to use `terragrunt run-all` workflows on staging environment or product levels in a terragrunt hierarchy. Mostly useful in large terragrunt projects containing lots of interdependent child modules. Atlantis `locals` can be used in the defined project marker files.
-
-| Flag Name                    | Description                                                                                                                                                                     | Default Value     | Type |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |----- |
-| `--project-hcl-files`        | Comma-separated names of arbitrary hcl files in the terragrunt hierarchy to create Atlantis projects for.<br>Disables the `--filter` flag  | ""      |  list(string) |
-| `--use-project-markers`      | If enabled, project hcl files must include `locals { atlantis_project = true }` for project creation.  | false      |  bool |
-| `--create-hcl-project-childs`        | Creates Atlantis projects for terragrunt child modules below the directories containing the HCL files defined in --project-hcl-files  | false       | bool |
-| `--create-hcl-project-external-childs`    | Creates Atlantis projects for terragrunt child modules outside the directories containing the HCL files defined in --project-hcl-files  | true          | bool |
-
-## All Locals
-
-Another way to customize the output is to use `locals` values in your terragrunt modules. These can be set in either the parent or child terragrunt modules, and the settings will only affect the current module (or all child modules for parent locals).
-
-| Locals Name                   | Description                                                                                                                                                    | type         |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| `atlantis_workflow`           | The custom atlantis workflow name to use for a module                                                                                                          | string       |
-| `atlantis_apply_requirements` | The custom `apply_requirements` array to use for a module                                                                                                      | list(string) |
-| `atlantis_terraform_version`  | Allows overriding the `--terraform-version` flag for a single module                                                                                           | string       |
-| `atlantis_autoplan`           | Allows overriding the `--autoplan` flag for a single module                                                                                                    | bool         |
-| `atlantis_skip`               | If true on a child module, that module will not appear in the output.<br>If true on a parent module, none of that parent's children will appear in the output. | bool         |
-| `extra_atlantis_dependencies` | See [Extra dependencies](https://github.com/transcend-io/terragrunt-atlantis-config#extra-dependencies)                                                        | list(string) |
 
 ## Separate workspace for parallel plan and apply
 
@@ -174,7 +181,7 @@ name of the workspace.
 As an example, project `${git_root}/stage/app/terragrunt.hcl` will have the name `stage_app` as workspace name. This flag should be used along with `parallel` to enable parallel plan and apply:
 
 ```bash
-terragrunt-atlantis-config generate --output atlantis.yaml --parallel --create-workspace
+terraform-atlantis-config generate --output atlantis.yaml --parallel --create-workspace
 ```
 
 Enabling this feature may consume more resources like cpu, memory, network, and disk, as each workspace will now be cloned separately by atlantis.

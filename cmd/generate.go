@@ -120,7 +120,6 @@ func createProject(path string) (*AtlantisProject, error) {
 		return nil, nil
 	}
 
-	dependencies := []string{}
 	dependencies, err := getDependencies(rootModule, locals)
 	if err != nil {
 		return nil, err

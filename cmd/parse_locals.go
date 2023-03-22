@@ -40,76 +40,71 @@ func resolveLocals(module *configs.Module) ResolvedLocals {
 	resolved := ResolvedLocals{}
 	locals := module.Locals
 
-	// Return an empty set of locals if no `locals` block was present
-	if len(locals) == 0 {
+	atlantisMap, ok := locals["atlantis"]
+
+	if len(locals) == 0 || !ok {
 		return resolved
 	}
 
-	workflowValue, ok := locals["atlantis_workflow"]
+	atlantisValues, diag := atlantisMap.Expr.Value(nil)
+	if diag.HasErrors() {
+		return resolved
+	}
+	values := atlantisValues.AsValueMap()
+
+	workflowValue, ok := values["workflow"]
 	if ok {
-		val, diag := workflowValue.Expr.Value(nil)
-		if !diag.HasErrors() {
-			resolved.AtlantisWorkflow = val.AsString()
+		if workflowValue.Type().IsPrimitiveType() {
+			resolved.AtlantisWorkflow = workflowValue.AsString()
 		}
 	}
 
-	executionOrderGroup, ok := locals["atlantis_execution_order_group"]
+	executionOrderGroup, ok := values["execution_order_group"]
 	if ok {
-		val, diag := executionOrderGroup.Expr.Value(nil)
-		if !diag.HasErrors() {
-			if val.Type().Equals(cty.Number) {
-				intValue, _ := val.AsBigFloat().Int64()
-				resolved.ExecutionOrderGroup = int(intValue)
-			}
+		if executionOrderGroup.Type().Equals(cty.Number) {
+			intValue, _ := executionOrderGroup.AsBigFloat().Int64()
+			resolved.ExecutionOrderGroup = int(intValue)
 		}
 	}
 
-	versionValue, ok := locals["atlantis_terraform_version"]
+	versionValue, ok := values["terraform_version"]
 	if ok {
-		val, diag := versionValue.Expr.Value(nil)
-		if !diag.HasErrors() {
-			resolved.TerraformVersion = val.AsString()
+		if versionValue.Type().IsPrimitiveType() {
+			resolved.TerraformVersion = versionValue.AsString()
 		}
 	}
-	//
-	autoPlanValue, ok := locals["atlantis_autoplan"]
+
+	autoPlanValue, ok := values["autoplan"]
 	if ok {
-		val, diag := autoPlanValue.Expr.Value(nil)
-		if !diag.HasErrors() {
-			hasValue := val.True()
+		if autoPlanValue.Type().Equals(cty.Bool) {
+			hasValue := autoPlanValue.True()
 			resolved.AutoPlan = &hasValue
 		}
-
 	}
 
-	skipValue, ok := locals["atlantis_skip"]
+	skipValue, ok := values["skip"]
 	if ok {
-		val, diag := skipValue.Expr.Value(nil)
-		if !diag.HasErrors() {
-			hasValue := val.True()
+		if skipValue.Type().Equals(cty.Bool) {
+			hasValue := skipValue.True()
 			resolved.Skip = &hasValue
 		}
 	}
 
-	applyReqs, ok := locals["atlantis_apply_requirements"]
+	applyReqs, ok := values["apply_requirements"]
 	if ok {
-		val, diag := applyReqs.Expr.Value(nil)
-		if !diag.HasErrors() {
-			resolved.ApplyRequirements = []string{}
-			it := val.ElementIterator()
+		if applyReqs.Type().IsTupleType() {
+			it := applyReqs.ElementIterator()
 			for it.Next() {
 				_, val := it.Element()
-				resolved.ApplyRequirements = append(resolved.ApplyRequirements, val.AsString())
+				resolved.ApplyRequirements = append(resolved.ApplyRequirements, filepath.ToSlash(val.AsString()))
 			}
 		}
-
 	}
 
-	extraDependencies, ok := locals["extra_atlantis_dependencies"]
+	extraDependencies, ok := values["extra_dependencies"]
 	if ok {
-		val, diag := extraDependencies.Expr.Value(nil)
-		if !diag.HasErrors() {
-			it := val.ElementIterator()
+		if extraDependencies.Type().IsTupleType() {
+			it := extraDependencies.ElementIterator()
 			for it.Next() {
 				_, val := it.Element()
 				resolved.ExtraAtlantisDependencies = append(resolved.ExtraAtlantisDependencies, filepath.ToSlash(val.AsString()))
